@@ -1,0 +1,70 @@
+name: Build minio image to GHCR
+
+# Builds the minio server from source at a release tag and publishes a
+# linux/amd64 container to ghcr.io/<owner>/minio. MinIO no longer ships pullable
+# community images on Docker Hub, so the cluster pulls this self-built image via
+# the existing ghcr read:packages credential.
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "minio release tag to build (e.g. RELEASE.2025-10-15T17-29-55Z)"
+        required: true
+        default: "RELEASE.2025-10-15T17-29-55Z"
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      IMAGE: ghcr.io/${{ github.repository_owner }}/minio
+    steps:
+      - name: Checkout minio at the release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag }}
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+
+      - name: Build static linux/amd64 binary
+        env:
+          CGO_ENABLED: "0"
+          GOOS: linux
+          GOARCH: amd64
+        run: |
+          LD="$(go run buildscripts/gen-ldflags.go "${{ inputs.release_tag }}")"
+          go build -tags kqueue -trimpath -ldflags "$LD" -o minio .
+          file minio
+          ./minio --version || true
+
+      - name: Write runtime Dockerfile
+        run: |
+          cat > Dockerfile.ghcr <<'DOCKER'
+          FROM alpine:3.21
+          RUN apk add --no-cache ca-certificates bash coreutils && mkdir -p /data
+          COPY minio /usr/bin/minio
+          COPY dockerscripts/docker-entrypoint.sh /usr/bin/docker-entrypoint.sh
+          RUN chmod +x /usr/bin/minio /usr/bin/docker-entrypoint.sh
+          EXPOSE 9000
+          VOLUME ["/data"]
+          ENTRYPOINT ["/usr/bin/docker-entrypoint.sh"]
+          CMD ["minio"]
+          DOCKER
+
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Build and push
+        run: |
+          TAG="${{ inputs.release_tag }}"
+          docker build -f Dockerfile.ghcr -t "${IMAGE}:${TAG}" .
+          docker push "${IMAGE}:${TAG}"
+          echo "Pushed ${IMAGE}:${TAG}" >> "$GITHUB_STEP_SUMMARY"
