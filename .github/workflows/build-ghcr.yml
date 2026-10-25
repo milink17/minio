@@ -40,7 +40,11 @@ jobs:
           GOOS: linux
           GOARCH: amd64
         run: |
-          LD="$(go run buildscripts/gen-ldflags.go "${{ inputs.release_tag }}")"
+          # gen-ldflags.go parses the arg as a time layout (2006-01-02T15-04-05Z),
+          # so pass the bare timestamp; it reconstructs the full RELEASE.* tag itself.
+          VERSION="${{ inputs.release_tag }}"
+          VERSION="${VERSION#RELEASE.}"
+          LD="$(go run buildscripts/gen-ldflags.go "$VERSION")"
           go build -tags kqueue -trimpath -ldflags "$LD" -o minio .
           file minio
           ./minio --version || true
